@@ -1,17 +1,60 @@
 ?start     : program
 
-program    : stmt*
+program    : declaration*
 
-?stmt      : expr ";"
+?declaration: var_decl
+            | function_decl
+            | stmt
+            | class_decl
+
+?stmt      : expr_stmt
            | print_cmd
-           // | if_cmd
-           // | for_cmd
+           | block
+           | if_cmd
+           | while_cmd
+           | return_cmd
+           | for_cmd
+           
            // | ...
 
 print_cmd  : "print" expr ";"
 
+block      : "{" declaration* "}"
+
+if_cmd     : "if" "(" expr ")" stmt ["else" stmt]
+
+while_cmd  : "while" "(" expr ")" stmt
+
+for_cmd    : "for" "(" for_init for_cond ";" for_incr ")" stmt
+for_init   : var_decl
+           | expr_stmt
+           | ";"           -> empty_init
+for_cond   : expr?          -> maybe_cond
+for_incr   : expr?          -> maybe_incr
+
+expr_stmt  : expr ";"
+
+
+var_decl   : "var" VAR ("=" expr)? ";"
+function_decl: "fun" VAR "(" param_list? ")" block    -> function
+class_decl: "class" VAR ("<" VAR)? "{" method_decl* "}"   -> class_decl
+method_decl: VAR "(" param_list? ")" block            -> method
+param_list  : VAR ("," VAR)*
+return_cmd  : "return" expr? ";"    -> return_cmd
+
+
 // EXPRESSÕES
-?expr      : test
+
+?expr      : assignment
+
+?assignment: call "=" assignment   -> assign_expr
+           | or_
+
+?or_       : and_
+           | or_ "or" and_   -> or_
+
+?and_      : test
+           | and_ "and" test -> and_
 
 ?test      : test "==" cmp  -> eq
            | test "!=" cmp  -> ne
@@ -27,23 +70,38 @@ print_cmd  : "print" expr ";"
            | factor "-" term  -> sub
            | term
 
-?term      : term "*" atom   -> mul
-           | term "/" atom   -> div 
-           | atom
+?term      : term "*" unary   -> mul
+          | term "/" unary   -> div
+          | unary
 
-?atom      : NUMBER 
+?unary     : "!" unary        -> not_
+          | "-" unary        -> neg
+          | atom
+
+?atom      : call
+
+call       : primary call_suffix*
+
+call_suffix: "(" params ")"   -> args
+           | "." VAR          -> attr
+
+?primary   : NUMBER
+           | THIS                -> this
+           | SUPER "." VAR       -> super
            | BOOL
            | VAR
            | STRING
            | NIL
-           | "(" cmp ")"
-           | call
+           | grouping
 
-call       : VAR "(" params ")"
+grouping  : "(" expr ")"
+
 params     : [ expr ("," expr )* ]
 
+THIS.2     : "this"
+SUPER.2    : "super"
 BOOL.2     : "true" | "false"
-VAR.1      : /[a-z_]\w*/
+VAR.1      : /[A-Za-z_]\w*/
 NUMBER     : /([1-9][0-9]*|0)(\.[0-9]+)?/ 
 STRING     : /"[^"]*"/
 NIL.2      : "nil"

@@ -1,25 +1,32 @@
 from abc import ABC
 from dataclasses import dataclass
 from typing import Callable
-
 from .ctx import Ctx
+from .runtime import LoxFunction, LoxReturn, LoxClass, LoxError, truthy, show, LoxInstance
+from .node import Node, Cursor
+from .errors import SemanticError
 
-# Declaramos nossa classe base num módulo separado para esconder um pouco de
-# Python relativamente avançado de quem não se interessar pelo assunto.
-#
-# A classe Node implementa um método `pretty` que imprime as árvores de forma
-# legível. Também possui funcionalidades para navegar na árvore usando cursores
-# e métodos de visitação.
-from .node import Node
+KEYWORDS = {
+    "and",
+    "class",
+    "else",
+    "false",
+    "for",
+    "fun",
+    "if",
+    "nil",
+    "or",
+    "print",
+    "return",
+    "super",
+    "this",
+    "true",
+    "var",
+    "while",
+}
 
-
-#
-# TIPOS BÁSICOS
-#
-
-# Tipos de valores que podem aparecer durante a execução do programa
+""" Tipos de valores que podem aparecer durante a execução do programa"""
 Value = bool | str | float | None
-
 
 class Expr(Node, ABC):
     """
@@ -92,6 +99,9 @@ class Var(Expr):
         except KeyError:
             raise NameError(f"variável {self.name} não existe!")
 
+    def validate_self(self, cursor: Cursor):
+        if self.name in KEYWORDS:
+            raise SemanticError("nome inválido", token=self.name)
 
 @dataclass
 class Literal(Expr):
@@ -110,29 +120,29 @@ class Literal(Expr):
 
 @dataclass
 class And(Expr):
-    """
-    Uma operação infixa com dois operandos.
+    """Operador lógico 'and' com curto-circuito."""
 
-    Ex.: x and y
-    """
+    left: Expr
+    right: Expr
 
+    def eval(self, ctx: Ctx):
+        left_value = self.left.eval(ctx)
+        if not truthy(left_value):
+            return left_value
+        return self.right.eval(ctx)
 
 @dataclass
 class Or(Expr):
-    """
-    Uma operação infixa com dois operandos.
-    Ex.: x or y
-    """
+    """Operador lógico 'or' com curto-circuito."""
 
+    left: Expr
+    right: Expr
 
-@dataclass
-class UnaryOp(Expr):
-    """
-    Uma operação prefixa com um operando.
-
-    Ex.: -x, !x
-    """
-
+    def eval(self, ctx: Ctx):
+        left_value = self.left.eval(ctx)
+        if truthy(left_value):
+            return left_value
+        return self.right.eval(ctx)
 
 @dataclass
 class Call(Expr):
@@ -141,18 +151,16 @@ class Call(Expr):
 
     Ex.: fat(42)
     """
-    name: str
+
+    callee: Expr
     params: list[Expr]
-    
+
     def eval(self, ctx: Ctx):
-        func = ctx[self.name]
-        params = []
-        for param in self.params:
-            params.append(param.eval(ctx))
-        
+        func = self.callee.eval(ctx)
+        args = [p.eval(ctx) for p in self.params]
         if callable(func):
-            return func(*params)
-        raise TypeError(f"{self.name} não é uma função!")
+            return func(*args)
+        raise TypeError(f"{func!r} não é chamável")
 
 
 @dataclass
@@ -163,6 +171,17 @@ class This(Expr):
     Ex.: this
     """
 
+    name: str = "this"
+
+    def eval(self, ctx: Ctx):
+        try:
+            return ctx[self.name]
+        except KeyError:
+            raise NameError("variável this não existe!")
+
+    def validate_self(self, cursor: Cursor):
+        if not cursor.is_scoped_to(Class):
+            raise SemanticError("uso inválido de 'this'", token="this")
 
 @dataclass
 class Super(Expr):
@@ -172,7 +191,23 @@ class Super(Expr):
     Ex.: super.x
     """
 
+    name: str
 
+    def eval(self, ctx: Ctx):
+        method_name = self.name
+        superclass = ctx["super"]
+        this = ctx["this"]
+        method = superclass.get_method(method_name)
+        return method.bind(this)
+
+    def validate_self(self, cursor: Cursor):
+        if not cursor.is_scoped_to(Class):
+            raise SemanticError("uso inválido de 'super'", token="super")
+
+        cls = cursor.class_scope().node
+        if cls.base is None:
+            raise SemanticError("classe sem superclasse", token="super")
+        
 @dataclass
 class Assign(Expr):
     """
@@ -180,7 +215,13 @@ class Assign(Expr):
 
     Ex.: x = 42
     """
+    name: str
+    value: Expr
 
+    def eval(self, ctx: Ctx):
+        result = self.value.eval(ctx)
+        ctx.assign(self.name, result)
+        return result
 
 @dataclass
 class Getattr(Expr):
@@ -190,19 +231,37 @@ class Getattr(Expr):
     Ex.: x.y
     """
 
+    obj: Expr
+    attr: str
+
+    def eval(self, ctx: Ctx):
+        value = self.obj.eval(ctx)
+        if (
+            value is None
+            or type(value) in (bool, float, str)
+            or isinstance(value, (LoxClass, LoxFunction))
+        ):
+            raise LoxError("Somente instâncias têm propriedades.")
+        return getattr(value, self.attr)
 
 @dataclass
 class Setattr(Expr):
-    """
-    Atribuição de atributo de um objeto.
+    obj: Expr
+    attr: str
+    value: Expr
 
-    Ex.: x.y = 42
-    """
+    def eval(self, ctx: Ctx):
+        obj_value = self.obj.eval(ctx)
+        if (
+            obj_value is None
+            or type(obj_value) in (bool, float, str)
+            or isinstance(obj_value, (LoxClass, LoxFunction))
+        ):
+            raise LoxError("Somente instâncias tem campos")
+        result = self.value.eval(ctx)
+        setattr(obj_value, self.attr, result)
+        return result
 
-
-#
-# COMANDOS
-#
 @dataclass
 class Print(Stmt):
     """
@@ -214,72 +273,124 @@ class Print(Stmt):
     
     def eval(self, ctx: Ctx):
         value = self.expr.eval(ctx)
-        print(value)
-
+        print(show(value))
 
 @dataclass
 class Return(Stmt):
-    """
-    Representa uma instrução de retorno.
+    value: Expr | None = None
 
-    Ex.: return x;
-    """
+    def eval(self, ctx: Ctx):
+        result = None if self.value is None else self.value.eval(ctx)
+        raise LoxReturn(result)
 
+    def validate_self(self, cursor: Cursor):
+        if not cursor.is_scoped_to(Function):
+            raise SemanticError("return fora de função", token="return")
+        func_cursor = cursor.function_scope()
+        if (
+            self.value is not None
+            and func_cursor.node.name == "init"
+            and isinstance(func_cursor.parent().node, Class)
+        ):
+            raise SemanticError(
+                "não pode retornar valor de inicializador",
+                token="return",
+            )
 
 @dataclass
 class VarDef(Stmt):
-    """
-    Representa uma declaração de variável.
+    name: str
+    value: Expr
 
-    Ex.: var x = 42;
-    """
+    def eval(self, ctx: Ctx):
+        ctx.var_def(self.name, self.value.eval(ctx))
 
+    def validate_self(self, cursor: Cursor):
+        if self.name in KEYWORDS:
+            raise SemanticError("nome inválido", token=self.name)
+        if isinstance(cursor.parent().node, Program):
+            return
+        for desc in self.value.cursor().descendants():
+            node = desc.node
+            if isinstance(node, Var) and node.name == self.name:
+                raise SemanticError(
+                    "variável usada em seu próprio inicializador",
+                    token=self.name,
+                )
 
 @dataclass
 class If(Stmt):
-    """
-    Representa uma instrução condicional.
+    cond: Expr
+    then_branch: Stmt
+    else_branch: Stmt | None = None
 
-    Ex.: if (x > 0) { ... } else { ... }
-    """
-
-
-@dataclass
-class For(Stmt):
-    """
-    Representa um laço de repetição.
-
-    Ex.: for (var i = 0; i < 10; i++) { ... }
-    """
-
-
+    def eval(self, ctx: Ctx):
+        if truthy(self.cond.eval(ctx)):
+            self.then_branch.eval(ctx)
+        elif self.else_branch is not None:
+            self.else_branch.eval(ctx)
 @dataclass
 class While(Stmt):
-    """
-    Representa um laço de repetição.
+    cond: Expr
+    body: Stmt
 
-    Ex.: while (x > 0) { ... }
-    """
-
+    def eval(self, ctx: Ctx):
+        while truthy(self.cond.eval(ctx)):
+            self.body.eval(ctx)
 
 @dataclass
 class Block(Node):
-    """
-    Representa bloco de comandos.
+    stmts: list[Stmt]
 
-    Ex.: { var x = 42; print x;  }
-    """
+    def eval(self, ctx: Ctx):
+        ctx = ctx.push({})
+        try:
+            for stmt in self.stmts:
+                stmt.eval(ctx)
+        finally:
+            ctx.pop()
 
+    def validate_self(self, cursor: Cursor):
+        names: list[str] = [s.name for s in self.stmts if isinstance(s, VarDef)]
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                raise SemanticError("variável duplicada", token=name)
+            seen.add(name)
 
 @dataclass
 class Function(Stmt):
-    """
-    Representa uma função.
+    name: str
+    params: list[str]
+    body: Block
 
-    Ex.: fun f(x, y) { ... }
-    """
+    def eval(self, ctx: Ctx):
+        func = LoxFunction(
+            name=self.name,
+            params=self.params,
+            body=self.body.stmts,
+            ctx=ctx,
+        )
+        ctx.var_def(self.name, func)
+        return func
 
+    def validate_self(self, cursor: Cursor):
+        for p in self.params:
+            if p in KEYWORDS:
+                raise SemanticError("nome inválido", token=p)
 
+        if len(set(self.params)) != len(self.params):
+            seen: set[str] = set()
+            for p in self.params:
+                if p in seen:
+                    raise SemanticError("parâmetro duplicado", token=p)
+                seen.add(p)
+
+        body_vars = [s.name for s in self.body.stmts if isinstance(s, VarDef)]
+        for name in body_vars:
+            if name in self.params:
+                raise SemanticError("nome inválido", token=name)
+            
 @dataclass
 class Class(Stmt):
     """
@@ -287,3 +398,51 @@ class Class(Stmt):
 
     Ex.: class B < A { ... }
     """
+    name: str
+    methods: list["Function"]
+    base: str | None = None
+
+    def validate_self(self, cursor: Cursor):
+        if self.base == self.name:
+            raise SemanticError(
+                "classe nao pode herdar de si mesma",
+                token=self.name,
+            )
+
+    def eval(self, ctx: Ctx):
+        superclass = None
+        if self.base is not None:
+            try:
+                value = ctx[self.base]
+            except KeyError as e:
+                raise NameError(f"classe {self.base} não existe") from e
+            if not isinstance(value, LoxClass):
+                raise LoxError("Superclasse inválida")
+            superclass = value
+
+        if superclass is None:
+            method_ctx = ctx
+        else:
+            method_ctx = ctx.push({"super": superclass})
+
+        methods: dict[str, LoxFunction] = {}
+        for method in self.methods:
+            method_impl = LoxFunction(
+                name=method.name,
+                params=method.params,
+                body=method.body.stmts,
+                ctx=method_ctx,
+            )
+            methods[method.name] = method_impl
+
+        lox_class = LoxClass(self.name, methods, superclass)
+        ctx.var_def(self.name, lox_class)
+        return lox_class
+
+@dataclass
+class UnaryOp(Expr):
+    op: Callable[[Value], Value]
+    operand: Expr
+
+    def eval(self, ctx: Ctx):
+        return self.op(self.operand.eval(ctx))

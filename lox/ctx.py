@@ -84,6 +84,16 @@ class Ctx:
             raise KeyError(f"Variable '{name}' already defined in the current scope.")
         self.scope[name] = value
 
+    def assign(self, key: str, value: "Value"):
+        """Encontra a ocorrência mais próxima de ``key`` e atualiza seu valor."""
+        ctx: Optional[Ctx] = self
+        while ctx is not None:
+            if key in ctx.scope:
+                ctx.scope[key] = value
+                return
+            ctx = ctx.parent
+        raise KeyError(f"Variable '{key}' not found in context.")
+
     def to_dict(self) -> ScopeDict:
         """
         Converte o contexto para um dicionário.
@@ -116,18 +126,19 @@ class Ctx:
         return "\n".join(reversed(lines))
 
     def pop(self) -> tuple[ScopeDict, "Ctx"]:
-        """
-        Remove o escopo mais interno e retorna o contexto atualizado.
-        """
+        """Remove o escopo mais interno e retorna uma dupla com o escopo
+        descartado e o contexto resultante."""
+
         if self.parent is None:
             raise RuntimeError("Cannot pop the global scope.")
+
         return self.scope, self.parent
 
-    def push(self, env: ScopeDict) -> "Ctx":
-        """
-        Empilha um novo escopo no contexto atual.
-        """
-        return Ctx(env, self)
+    def push(self, tos: ScopeDict) -> "Ctx":
+        """Adiciona ``tos`` como novo escopo mais interno e retorna o novo
+        contexto."""
+
+        return Ctx(tos, self)
 
     def is_global(self) -> bool:
         """

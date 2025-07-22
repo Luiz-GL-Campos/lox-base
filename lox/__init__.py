@@ -4,11 +4,12 @@ ATENÇÃO: EVITE MODIFICAR ESTE ARQUIVO!
 Carrega os nomes principais do módulo lox.
 """
 
-from .ast import Expr, Stmt, Value
+from .ast import (Expr, Stmt, Value, Getattr, Setattr)
 from .ctx import Ctx
 from .errors import SemanticError
 from .node import Node
 from .parser import lex, parse, parse_cst, parse_expr
+from .runtime import LoxObject
 
 __all__ = [
     "Ctx",
@@ -21,6 +22,8 @@ __all__ = [
     "parse_expr",
     "Stmt",
     "SemanticError",
+    "Getattr", 
+    "Setattr"
 ]
 
 
